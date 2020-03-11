@@ -1,0 +1,456 @@
+---
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: hide
+    highlight: zenburn
+    theme: flatly
+---
+
+# Orbsen Therapeutics NGS power calculations
+*Barry Digby, Dr. Pilib O'Broin*
+
+# Overview
+The aim of this analysis is to provide estimates of required samples in order to capture meaningful biological changes between different cell sorting methods. Recall PA and TYTO were very similar in latent space, thus PA has been omitted from the analysis however, TYTO samples are representative of PA samples in this report.
+
+To perform this analysis, the **RNASeqpower** package was used. A brief explanation of the commands used is given below:
+
+> rnapower(depth, n, cv = cv, effect, alpha, power)
+
+
+* Depth: *"average depth of coverage for the transcript or gene of interest. Common values are 5-20, any numeric value >0 is valid."* I interpreted this parameter as an opportunity to bin the results by the level of gene expression. Intuitively, lowly expressed genes will require more samples to accurately capture expression, whilst highly expressed genes require fewer samples. Given below are 2 distributions of counts per million (CPM) for each gene in the experiment. Being on the log2 scale, values left of 0 on the x-axis can be ignored.
+ In order to detect lowly expressed genes, depth will be set to 5. Intermediate genes will be denoted by depth = 10 and highly expressed genes are represented by depth = 15. 
+
+### Coverage Distribution{.tabset}
+
+#### Cytokine
+
+```{R, message=F}
+library(biomaRt)
+library(rhdf5)
+library(tximport)
+library(edgeR)
+library(RNASeqPower)
+library(DT)
+
+# Read in Kallisto abundance.h5 files.
+dir <- ("~/new_Kallisto_Quant/CYTO/") 
+samples <- read.table(file.path(dir, "meta.cyto.txt"), sep="\t", header=T, row.names="Sample") 
+files <- file.path(dir, rownames(samples),"abundance.h5") 
+names(files) <- paste0(rownames(samples))
+
+# Create tx2gene, map transcripts to gene using tximport
+mart <- useMart(biomart = "ensembl", dataset = "hsapiens_gene_ensembl") 
+results <- getBM(attributes = c("ensembl_transcript_id_version","ensembl_gene_id"), mart = mart)
+tx2gene <- results[, 1:2] 
+txi <- tximport(files, type = "kallisto", tx2gene = tx2gene) 
+
+cts <- txi$counts
+normMat <- txi$length
+normMat <- normMat/exp(rowMeans(log(normMat)))
+offset <- log(calcNormFactors(cts/normMat)) + log(colSums(cts/normMat))
+
+condition = as.factor(samples$condition)
+donor = as.factor(samples$rep)
+
+design = model.matrix(~donor + condition)
+
+edgeR_dgelist <- DGEList(counts=cts)
+edgeR_dgelist <- estimateDisp(edgeR_dgelist, design, robust = T)
+
+edgeR_dgelist$offset <- t(t(log(normMat)) + offset)
+edgeR_dgelist <- calcNormFactors(edgeR_dgelist, method = "TMM")
+edgeR_dgelist <- estimateCommonDisp(edgeR_dgelist)
+
+hist(edgeR_dgelist[["AveLogCPM"]], main ="Distribution counts per million - Cytokine Treated", xlab = "Average Log CPM", col = 'light blue', border = 'black', prob = T, xlim=c(-5,15), ylim=c(0,0.07))
+box(which="plot", lty="solid", col="black")
+```
+
+#### Control
+
+```{R, message =F}
+library(biomaRt)
+library(rhdf5)
+library(tximport)
+library(edgeR)
+library(RNASeqPower)
+library(DT)
+
+# Read in Kallisto abundance.h5 files.
+dir <- ("~/new_Kallisto_Quant/Control/") 
+samples <- read.table(file.path(dir, "meta.control.txt"), sep="\t", header=T, row.names="Sample") 
+files <- file.path(dir, rownames(samples),"abundance.h5") 
+names(files) <- paste0(rownames(samples))
+
+# Create tx2gene, map transcripts to gene using tximport
+mart <- useMart(biomart = "ensembl", dataset = "hsapiens_gene_ensembl") 
+results <- getBM(attributes = c("ensembl_transcript_id_version","ensembl_gene_id"), mart = mart)
+tx2gene <- results[, 1:2] 
+txi <- tximport(files, type = "kallisto", tx2gene = tx2gene) 
+
+cts <- txi$counts
+normMat <- txi$length
+normMat <- normMat/exp(rowMeans(log(normMat)))
+offset <- log(calcNormFactors(cts/normMat)) + log(colSums(cts/normMat))
+
+condition = as.factor(samples$condition)
+donor = as.factor(samples$rep)
+
+design = model.matrix(~donor + condition)
+
+edgeR_dgelist <- DGEList(counts=cts)
+edgeR_dgelist <- estimateDisp(edgeR_dgelist, design, robust = T)
+
+edgeR_dgelist$offset <- t(t(log(normMat)) + offset)
+edgeR_dgelist <- calcNormFactors(edgeR_dgelist, method = "TMM")
+edgeR_dgelist <- estimateCommonDisp(edgeR_dgelist)
+
+hist(edgeR_dgelist[["AveLogCPM"]], main = "Distribution counts per million - Control Treated", xlab = "Average Log CPM", col = 'light blue', border = 'black', prob = T, xlim=c(-5,15), ylim=c(0,0.07))
+box(which="plot", lty="solid", col="black")
+```
+
+
+* Coefficient of variance (CV) of counts: This will be calculated using **EdgeR** as shown in the code below for each cell type comparison. 
+
+* Alpha: 0.05. Standard used in most analysis.
+
+* Power: *"Probability of obtaining a correct small p-value (0.05)"* 80% and 90% power are explored here. 
+* Target effect size: the effect size between two populations can be determined by calculating the mean gene expression in group A, the mean gene expression in group B and dividing the group B mean by group A mean. This returns a Fold Change for group B. For the analysis we will be using a grid of Fold changes in this analysis:  c(1.25, 1.5, 1.75, 2).
+
+* Sample size (n): Leave empty, formula solves itself and returns sample size as our result.
+
+The sections below provide code to reproduce the included results and plots. 
+
+```{r echo = T, results = 'hide', message=F}
+library(biomaRt)
+library(rhdf5)
+library(tximport)
+library(edgeR)
+library(RNASeqPower)
+library(DT)
+
+# Read in Kallisto abundance.h5 files.
+dir <- ("~/new_Kallisto_Quant/CYTO/") 
+samples <- read.table(file.path(dir, "meta.cyto.txt"), sep="\t", header=T, row.names="Sample") 
+files <- file.path(dir, rownames(samples),"abundance.h5") 
+names(files) <- paste0(rownames(samples))
+
+# Create tx2gene, map transcripts to gene using tximport
+mart <- useMart(biomart = "ensembl", dataset = "hsapiens_gene_ensembl") 
+results <- getBM(attributes = c("ensembl_transcript_id_version","ensembl_gene_id"), mart = mart)
+tx2gene <- results[, 1:2] 
+txi <- tximport(files, type = "kallisto", tx2gene = tx2gene) 
+
+
+# Extract counts for Edge R
+cts <- txi$counts
+normMat <- txi$length
+normMat <- normMat/exp(rowMeans(log(normMat)))
+offset <- log(calcNormFactors(cts/normMat)) + log(colSums(cts/normMat))
+
+# Begin subsetting counts, offset
+names <- c("ARIA", "ARIA_CD362", "PA", "TYTO")
+
+for(i in 1:length(names)){
+  id <- names[i]
+  key <- rownames(samples[samples$condition == id,])
+  counts <- cts[,key]
+  uniq_name <- paste(names[i], "counts", sep = "_")
+  assign(paste(uniq_name), counts)
+}
+
+counts <- cbind(ARIA_counts, ARIA_CD362_counts)
+a <- rep("ARIA", each=4)
+b <- rep("ARIA_CD362", each=4)
+key <- grep("ARIA", names(offset))
+offset <- offset[key]
+
+# Create EdgeR object
+edgeR_dgelist <- DGEList(counts=counts, group=as.factor(c(b,a)))
+edgeR_dgelist$offset <- t(t(log(normMat)) + offset)
+edgeR_dgelist <- calcNormFactors(edgeR_dgelist, method = "TMM")
+edgeR_dgelist <- estimateCommonDisp(edgeR_dgelist)
+bcv <- sqrt(edgeR_dgelist$common.dispersion) 
+cv1_aria = bcv
+
+
+counts <- cbind(ARIA_CD362_counts, PA_counts)
+a <- rep("PA", each=4)
+b <- rep("ARIA_CD362", each=4)
+key <- grep("ARIA_CD362|PA", names(offset))
+offset <- offset[key]
+
+edgeR_dgelist <- DGEList(counts=counts, group=as.factor(c(b,a)))
+edgeR_dgelist <- calcNormFactors(edgeR_dgelist, method = "TMM")
+edgeR_dgelist <- estimateCommonDisp(edgeR_dgelist)
+bcv <- sqrt(edgeR_dgelist$common.dispersion) 
+cv1_pa = bcv
+
+counts <- cbind(ARIA_CD362_counts, TYTO_counts)
+a <- rep("TYTO", each=4)
+b <- rep("ARIA_CD362", each=4)
+key <- grep("ARIA_CD362|TYTO", names(offset))
+offset <- offset[key]
+
+edgeR_dgelist <- DGEList(counts=counts, group=as.factor(c(b,a)))
+edgeR_dgelist <- calcNormFactors(edgeR_dgelist, method = "TMM")
+edgeR_dgelist <- estimateCommonDisp(edgeR_dgelist)
+bcv <- sqrt(edgeR_dgelist$common.dispersion) 
+cv1_tyto = bcv
+
+dir <- ("~/new_Kallisto_Quant/Control/") 
+samples <- read.table(file.path(dir, "meta.control.txt"), sep="\t", header=T, row.names="Sample") 
+files <- file.path(dir, rownames(samples),"abundance.h5") 
+names(files) <- paste0(rownames(samples))
+
+mart <- useMart(biomart = "ensembl", dataset = "hsapiens_gene_ensembl") 
+results <- getBM(attributes = c("ensembl_transcript_id_version","ensembl_gene_id"), mart = mart)
+
+tx2gene <- results[, 1:2] 
+txi <- tximport(files, type = "kallisto", tx2gene = tx2gene) 
+
+cts <- txi$counts
+normMat <- txi$length
+normMat <- normMat/exp(rowMeans(log(normMat)))
+offset <- log(calcNormFactors(cts/normMat)) + log(colSums(cts/normMat))
+
+names <- c("ARIA", "ARIA_CD362", "PA", "TYTO")
+
+for(i in 1:length(names)){
+  id <- names[i]
+  key <- rownames(samples[samples$condition == id,])
+  counts <- cts[,key]
+  uniq_name <- paste(names[i], "counts", sep = "_")
+  assign(paste(uniq_name), counts)
+}
+
+# We need the biological coefficient of variation for each comparison
+counts <- cbind(ARIA_CD362_counts, ARIA_counts)
+a <- rep("ARIA", each=4)
+b <- rep("ARIA_CD362", each=4)
+key <- grep("ARIA", names(offset))
+offset <- offset[key]
+
+edgeR_dgelist <- DGEList(counts=counts, group=as.factor(c(b,a)))
+edgeR_dgelist$offset <- t(t(log(normMat)) + offset)
+edgeR_dgelist <- calcNormFactors(edgeR_dgelist, method = "TMM")
+edgeR_dgelist <- estimateCommonDisp(edgeR_dgelist)
+bcv <- sqrt(edgeR_dgelist$common.dispersion) 
+cv2_aria = bcv
+
+
+counts <- cbind(ARIA_CD362_counts, PA_counts)
+a <- rep("PA", each=4)
+b <- rep("ARIA_CD362", each=4)
+key <- grep("ARIA_CD362|PA", names(offset))
+offset <- offset[key]
+
+edgeR_dgelist <- DGEList(counts=counts, group=as.factor(c(b,a)))
+edgeR_dgelist <- calcNormFactors(edgeR_dgelist, method = "TMM")
+edgeR_dgelist <- estimateCommonDisp(edgeR_dgelist)
+bcv <- sqrt(edgeR_dgelist$common.dispersion) 
+cv2_pa = bcv
+
+counts <- cbind(ARIA_CD362_counts, TYTO_counts)
+a <- rep("TYTO", each=4)
+b <- rep("ARIA_CD362", each=4)
+key <- grep("ARIA_CD362|TYTO", names(offset))
+offset <- offset[key]
+
+edgeR_dgelist <- DGEList(counts=counts, group=as.factor(c(b,a)))
+edgeR_dgelist <- calcNormFactors(edgeR_dgelist, method = "TMM")
+edgeR_dgelist <- estimateCommonDisp(edgeR_dgelist)
+bcv <- sqrt(edgeR_dgelist$common.dispersion) 
+cv2_tyto = bcv
+
+
+# Set fixed parameters:
+power = c(0.8, 0.9)
+alpha = 0.05
+effect = c(1.25, 1.5, 1.75, 2)
+```
+
+# Required sample size calculation {.tabset}
+
+Different scenarios are explored.
+
+The 'rownames' represent the different Power values and the 'column names' represent the effect size. The cell value is the required number of samples in both groups necessary to obtain the desired effect (e.g detect genes with a 2 FC effect size at a 80%/90% chance of obtaining true p-values).
+
+For example, in the Control treated samples, cell comparison ARIA_CD362+ vs PA, to have 80% power of detecting a 2-Fold difference in Intermediately expressed genes at a FDR of 0.05, you will need 7 or more samples **in each group**.
+
+## Control{.tabset}
+
+### ARIA_CD362+ vs ARIA_CD362-{.tabset}
+
+#### Low expressed genes
+
+```{r}
+depth = 5
+tmp <- rnapower(depth = depth, cv = cv2_aria , effect = effect, alpha = alpha , power = power)
+DT::datatable(round(t(tmp)))
+```
+
+#### Intermediate expressed genes
+
+```{r}
+depth = 10
+tmp <- rnapower(depth = depth, cv = cv2_aria , effect = effect, alpha = alpha , power = power)
+DT::datatable(round(t(tmp)))
+```
+
+#### High expressed genes
+
+```{r}
+depth = 15
+tmp <- rnapower(depth = depth, cv = cv2_aria , effect = effect, alpha = alpha , power = power)
+DT::datatable(round(t(tmp)))
+```
+
+### ARIA_CD362+ vs PA {.tabset}
+
+#### Low expressed genes
+
+```{r}
+depth = 5
+temp <- rnapower(depth = depth, cv = cv2_pa , effect = effect, alpha = alpha , power = power)
+DT::datatable(round(t(temp)))
+```
+
+#### Intermediate expressed genes
+
+```{r}
+depth = 10
+temp <- rnapower(depth = depth, cv = cv2_pa , effect = effect, alpha = alpha , power = power)
+DT::datatable(round(t(temp)))
+```
+
+#### High expressed genes
+
+```{r}
+depth = 15
+temp <- rnapower(depth = depth, cv = cv2_pa , effect = effect, alpha = alpha , power = power)
+DT::datatable(round(t(temp)))
+```
+
+### ARIA_CD362+ vs TYTO{.tabset}
+
+#### Low expressed genes
+
+```{r}
+depth = 5
+temp <- rnapower(depth = depth, cv = cv2_tyto , effect = effect, alpha = alpha , power = power)
+DT::datatable(round(t(temp)))
+```
+
+#### Intermediate expressed genes
+
+```{r}
+depth = 10
+temp <- rnapower(depth = depth, cv = cv2_tyto , effect = effect, alpha = alpha , power = power)
+DT::datatable(round(t(temp)))
+```
+
+#### High expressed genes
+
+```{r}
+depth = 15
+temp <- rnapower(depth = depth, cv = cv2_tyto , effect = effect, alpha = alpha , power = power)
+DT::datatable(round(t(temp)))
+```
+
+## Cytokine{.tabset}
+
+### ARIA_CD362+ vs ARIA_CD362-{.tabset}
+
+#### Low expressed genes
+
+```{r}
+depth = 5
+tmp <- rnapower(depth = depth, cv = cv1_aria , effect = effect, alpha = alpha , power = power)
+DT::datatable(round(t(tmp)))
+```
+
+#### Intermediate expressed genes
+
+```{r}
+depth = 10
+tmp <- rnapower(depth = depth, cv = cv1_aria , effect = effect, alpha = alpha , power = power)
+DT::datatable(round(t(tmp)))
+```
+
+#### High expressed genes
+
+```{r}
+depth = 15
+tmp <- rnapower(depth = depth, cv = cv1_aria , effect = effect, alpha = alpha , power = power)
+DT::datatable(round(t(tmp)))
+```
+
+### ARIA_CD362+ vs PA {.tabset}
+
+#### Low expressed genes
+
+```{r}
+depth = 5
+temp <- rnapower(depth = depth, cv = cv1_pa , effect = effect, alpha = alpha , power = power)
+DT::datatable(round(t(temp)))
+```
+
+#### Intermediate expressed genes
+
+```{r}
+depth = 10
+temp <- rnapower(depth = depth, cv = cv1_pa , effect = effect, alpha = alpha , power = power)
+DT::datatable(round(t(temp)))
+```
+
+#### High expressed genes
+
+```{r}
+depth = 15
+temp <- rnapower(depth = depth, cv = cv1_pa , effect = effect, alpha = alpha , power = power)
+DT::datatable(round(t(temp)))
+```
+
+### ARIA_CD362+ vs TYTO{.tabset}
+
+#### Low expressed genes
+
+```{r}
+depth = 5
+temp <- rnapower(depth = depth, cv = cv1_tyto , effect = effect, alpha = alpha , power = power)
+DT::datatable(round(t(temp)))
+```
+
+#### Intermediate expressed genes
+
+```{r}
+depth = 10
+temp <- rnapower(depth = depth, cv = cv1_tyto , effect = effect, alpha = alpha , power = power)
+DT::datatable(round(t(temp)))
+```
+
+#### High expressed genes
+
+```{r}
+depth = 15
+temp <- rnapower(depth = depth, cv = cv1_tyto , effect = effect, alpha = alpha , power = power)
+DT::datatable(round(t(temp)))
+```
+
+
+
+# Analysis
+Unsurprsingly, lowly expressed genes require an inordinate amount of samples to capture a relevant effect size. This is due to the large variabilty in lowly expressed genes. Lowly expressed genes tend to be filtered out by Differential Expression analysis packages.
+
+In each table, the sample size increases as the Fold Change is lowered. This is because Fold Change is representative of effect size; to say that there is a lower effect size between two populations is to say they are derived from the same distribution. This is especially true for ARIA_CD362+ vs. ARIA_CD362- comparisons, as they have been shown to be very similar. 
+
+I would advise using the Intermediately expressed genes as a judge of sample size required.
+
+
+
+
+The most recent update of this html document occurred: `r date()`.
+
+For any queries about the analysis, contact Barry Digby at (b.digby237@gmail.com)
